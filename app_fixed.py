@@ -11,9 +11,21 @@ from sklearn.model_selection import train_test_split
 from sklearn.linear_model import LogisticRegression
 import nltk
 import time
+import ssl
 
-# Download stopwords
-nltk.download('stopwords')
+# Fix SSL certificate issues for NLTK download
+try:
+    _create_unverified_https_context = ssl._create_unverified_context
+except AttributeError:
+    pass
+else:
+    ssl._create_default_https_context = _create_unverified_https_context
+
+# Download stopwords with error handling
+try:
+    nltk.data.find('corpora/stopwords')
+except LookupError:
+    nltk.download('stopwords', quiet=True)
 
 # Check if model is already saved to avoid retraining
 @st.cache_resource
@@ -87,7 +99,13 @@ def load_model():
     
     # Define stemming function
     ps = PorterStemmer()
-    stop_words = set(stopwords.words('english'))
+    
+    # Get stopwords with error handling
+    try:
+        stop_words = set(stopwords.words('english'))
+    except LookupError:
+        nltk.download('stopwords', quiet=True)
+        stop_words = set(stopwords.words('english'))
     
     def stemming(content):
         stemmed_content = re.sub('[^a-zA-Z]',' ', content)
@@ -144,7 +162,13 @@ model, vector = load_model()
 def prediction(input_text):
     # Preprocess input text
     ps = PorterStemmer()
-    stop_words = set(stopwords.words('english'))
+    
+    # Get stopwords with error handling
+    try:
+        stop_words = set(stopwords.words('english'))
+    except LookupError:
+        nltk.download('stopwords', quiet=True)
+        stop_words = set(stopwords.words('english'))
     
     input_text_processed = re.sub('[^a-zA-Z]',' ', input_text)
     input_text_processed = input_text_processed.lower()
