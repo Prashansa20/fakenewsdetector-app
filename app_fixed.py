@@ -4,28 +4,120 @@ import re
 import pandas as pd
 import pickle
 import os
-from nltk.corpus import stopwords
-from nltk.stem.porter import PorterStemmer
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.model_selection import train_test_split
-from sklearn.linear_model import LogisticRegression
-import nltk
 import time
 import ssl
+import requests
+from io import StringIO, BytesIO
 
-# Fix SSL certificate issues for NLTK download
+# Try to import NLTK with fallback
 try:
-    _create_unverified_https_context = ssl._create_unverified_context
-except AttributeError:
-    pass
-else:
-    ssl._create_default_https_context = _create_unverified_https_context
+    import nltk
+    from nltk.corpus import stopwords
+    from nltk.stem.porter import PorterStemmer
+    
+    # Fix SSL certificate issues for NLTK download
+    try:
+        _create_unverified_https_context = ssl._create_unverified_context
+    except AttributeError:
+        pass
+    else:
+        ssl._create_default_https_context = _create_unverified_https_context
 
-# Download stopwords with error handling
+    # Download stopwords with error handling
+    try:
+        nltk.data.find('corpora/stopwords')
+    except LookupError:
+        nltk.download('stopwords', quiet=True)
+        
+    NLTK_AVAILABLE = True
+except ImportError:
+    st.error("NLTK is not installed. Please install it using: pip install nltk")
+    NLTK_AVAILABLE = False
+
+# Try to import sklearn with fallback
 try:
-    nltk.data.find('corpora/stopwords')
-except LookupError:
-    nltk.download('stopwords', quiet=True)
+    from sklearn.feature_extraction.text import TfidfVectorizer
+    from sklearn.model_selection import train_test_split
+    from sklearn.linear_model import LogisticRegression
+    SKLEARN_AVAILABLE = True
+except ImportError:
+    st.error("Scikit-learn is not installed. Please install it using: pip install scikit-learn")
+    SKLEARN_AVAILABLE = False
+
+# Try to import PyPDF2 with fallback
+try:
+    import PyPDF2
+    PYPDF2_AVAILABLE = True
+except ImportError:
+    st.error("PyPDF2 is not installed. Please install it using: pip install PyPDF2")
+    PYPDF2_AVAILABLE = False
+
+# Check if all required libraries are available
+if not all([NLTK_AVAILABLE, SKLEARN_AVAILABLE, PYPDF2_AVAILABLE]):
+    st.stop()
+
+# Google Drive file IDs (from your links)
+FAKE_PDF_ID = "1LB3I0x3oi_SEI6JAD58znaWgyRoh50Jm"
+TRUE_PDF_ID = "1ah9uVYS_yMoj7pzMhQKgw3eD6oci6GrI"
+
+def extract_text_from_pdf_url(pdf_url):
+    """Extract text from a PDF file given its Google Drive URL"""
+    try:
+        # Download the PDF
+        response = requests.get(pdf_url)
+        response.raise_for_status()
+        
+        # Read PDF content
+        pdf_file = BytesIO(response.content)
+        pdf_reader = PyPDF2.PdfReader(pdf_file)
+        
+        # Extract text from all pages
+        text = ""
+        for page in pdf_reader.pages:
+            text += page.extract_text() + " "
+        
+        return text.strip()
+    except Exception as e:
+        st.error(f"Error processing PDF: {str(e)}")
+        return None
+
+def download_and_process_pdfs():
+    """Download PDFs from Google Drive and extract text to create datasets"""
+    try:
+        # Create direct download URLs
+        fake_pdf_url = f"https://drive.google.com/uc?export=download&id={FAKE_PDF_ID}"
+        true_pdf_url = f"https://drive.google.com/uc?export=download&id={TRUE_PDF_ID}"
+        
+        st.sidebar.info("📥 Downloading and processing PDF files...")
+        
+        # Extract text from PDFs
+        fake_text = extract_text_from_pdf_url(fake_pdf_url)
+        true_text = extract_text_from_pdf_url(true_pdf_url)
+        
+        if fake_text is None or true_text is None:
+            st.error("Failed to process PDF files")
+            return None, None
+        
+        # Split text into articles (assuming each article is separated by multiple newlines)
+        fake_articles = [article.strip() for article in fake_text.split('\n\n') if len(article.strip()) > 100]
+        true_articles = [article.strip() for article in true_text.split('\n\n') if len(article.strip()) > 100]
+        
+        # Create DataFrames
+        fake_df = pd.DataFrame({"text": fake_articles})
+        fake_df["label"] = 0  # Fake news
+        
+        true_df = pd.DataFrame({"text": true_articles})
+        true_df["label"] = 1  # True news
+        
+        # Save for future use
+        fake_df.to_csv("fake_articles.csv", index=False)
+        true_df.to_csv("true_articles.csv", index=False)
+        
+        return true_df, fake_df
+        
+    except Exception as e:
+        st.error(f"Error downloading PDFs: {str(e)}")
+        return None, None
 
 # Check if model is already saved to avoid retraining
 @st.cache_resource
@@ -56,16 +148,22 @@ def load_model():
     time.sleep(0.5)
     
     try:
-        true_df = pd.read_csv("true.csv")
-        fake_df = pd.read_csv("fake.csv")
+        # Try to load from previously created CSV files first
+        if os.path.exists("true_articles.csv") and os.path.exists("fake_articles.csv"):
+            true_df = pd.read_csv("true_articles.csv")
+            fake_df = pd.read_csv("fake_articles.csv")
+            st.sidebar.info("📁 Loaded data from processed CSV files")
+        else:
+            # Download and process PDFs
+            true_df, fake_df = download_and_process_pdfs()
+            if true_df is None or fake_df is None:
+                st.error("❌ Failed to load datasets")
+                st.stop()
         
         # Debug: Check columns
-        print("True CSV columns:", list(true_df.columns))
-        print("Fake CSV columns:", list(fake_df.columns))
-        
-        # Add labels
-        true_df["label"] = 1
-        fake_df["label"] = 0
+        print("True data columns:", list(true_df.columns))
+        print("Fake data columns:", list(fake_df.columns))
+        print(f"True articles: {len(true_df)}, Fake articles: {len(fake_df)}")
         
         # Combine them
         news_df = pd.concat([true_df, fake_df], ignore_index=True)
@@ -79,22 +177,18 @@ def load_model():
         update_progress(2)
         time.sleep(0.5)
         
-    except FileNotFoundError:
-        st.error("❌ Error: Could not find 'true.csv' and/or 'fake.csv' files.")
+    except Exception as e:
+        st.error(f"❌ Error loading datasets: {str(e)}")
         st.stop()
     
     # Fill missing values
     news_df = news_df.fillna(' ')
     
-    # Create content column - flexible approach
-    if "author" in news_df.columns and "title" in news_df.columns:
-        news_df['content'] = news_df['author'].fillna("") + " " + news_df['title'].fillna("")
-    elif "title" in news_df.columns:
-        news_df['content'] = news_df['title'].fillna("")
-    elif "text" in news_df.columns:
+    # Create content column
+    if "text" in news_df.columns:
         news_df['content'] = news_df['text'].fillna("")
     else:
-        st.error("❌ Error: No suitable text columns found in dataset")
+        st.error("❌ Error: No text column found in dataset")
         st.stop()
     
     # Define stemming function
@@ -154,9 +248,6 @@ def load_model():
     status_text.empty()
     
     return model, vector
-
-# Load or train model
-model, vector = load_model()
 
 # Prediction function
 def prediction(input_text):
@@ -220,16 +311,16 @@ if st.button('🔎 Analyze News', type='primary', use_container_width=True):
             # Show results
             st.divider()
             if pred == 1:
-                st.error(f'🚨 **Fake News** (Confidence: {prob[1]*100:.1f}%)')
+                st.success(f'✅ **Real News** (Confidence: {prob[1]*100:.1f}%)')
             else:
-                st.success(f'✅ **Real News** (Confidence: {prob[0]*100:.1f}%)')
+                st.error(f'🚨 **Fake News** (Confidence: {prob[0]*100:.1f}%)')
             
             # Probability breakdown
             col1, col2 = st.columns(2)
             with col1:
-                st.metric("Real News Probability", f"{prob[0]*100:.1f}%")
+                st.metric("Real News Probability", f"{prob[1]*100:.1f}%")
             with col2:
-                st.metric("Fake News Probability", f"{prob[1]*100:.1f}%")
+                st.metric("Fake News Probability", f"{prob[0]*100:.1f}%")
     else:
         st.warning('⚠️ Please enter some text to analyze')
 
@@ -240,4 +331,4 @@ st.sidebar.info("📊 Ready to analyze news articles")
 
 # Footer
 st.divider()
-st.caption("🔄 First run trains the model. Future runs will be instant!")
+st.caption("🔄 First run will download and process PDF files. Future runs will be faster!")
